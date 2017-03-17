@@ -29,7 +29,7 @@ type expr =
   | ECond of expr * expr * expr
   | ELetRec of string * expr * expr
 and ptr =
-  | Ptr of string * value
+  | Ptr of string * int * value
 and env = (string * string) list
 and value =
   | VInt of int
@@ -38,16 +38,15 @@ and value =
 
 let empty_storage: (ptr list) = [];;
 let empty_env: (string * string) list = [];;
-let new_ptr x v = Ptr(x, v);;
 
 let rec lookup_storage st x = match st with
     | h :: t ->
-      let name = match h with | Ptr(a, _) -> a in
+      let name = match h with | Ptr(a, _, _) -> a in
       if name = x then
          h
       else
          lookup_storage t x
-    | [] -> failwith ("storage lookup error")
+    | [] -> failwith (sprintf "storage lookup error for name %s" x)
 
 let rec lookup_env env x = match env with
     | (var, pname) :: t ->
@@ -59,11 +58,11 @@ let rec lookup_env env x = match env with
 ;;
 
 let extend_env env s pname = (s, pname) :: env;;
-let extend_storage st s v = Ptr(s, v) :: st;;
+let extend_storage st s rc v = Ptr(s, rc, v) :: st;;
 
 
 let rec print_ptr p = match p with
-    | Ptr(x, v) -> printf "%s |-> " x; print_value v
+    | Ptr(x, rc, v) -> printf "%s |(%d)-> " x rc; print_value v
 
 and print_env e = match e with
     | (s, pname) :: t ->
@@ -73,9 +72,8 @@ and print_env e = match e with
     | [] -> printf "_"
 
 and print_storage s = match s with
-    | Ptr(p, v) :: t ->
-            printf "%s |-> " p;
-            print_value v;
+    | p :: t ->
+            print_ptr p;
             printf ", ";
             print_storage t
     | [] -> printf "_"
@@ -134,20 +132,20 @@ and print_expr e = match e with
 
 
 let test () =
-    let s1 = extend_storage empty_storage "p1" (VInt 1) in
+    let s1 = extend_storage empty_storage "p1" 1 (VInt 1) in
     print_ptr (lookup_storage s1 "p1"); printf "\n";
-    let s2 = extend_storage s1 "p2" (VClousure(ELambda("x", EVar "x"), empty_env)) in
+    let s2 = extend_storage s1 "p2" 1 (VClousure(ELambda("x", EVar "x"), empty_env)) in
     print_ptr (lookup_storage s2 "p2"); printf "\n"
 ;;
 
 (* test ();; *)
 
 let rec update_storage st pname v = match st with
-    | Ptr(pname', v') :: t ->
+    | Ptr(pname', rc, v') :: t ->
             if pname' = pname then
-                Ptr(pname', v) :: (update_storage t pname v)
+                Ptr(pname', rc, v) :: (update_storage t pname v)
             else
-                Ptr(pname', v') :: (update_storage t pname v)
+                Ptr(pname', rc, v') :: (update_storage t pname v)
     | [] -> []
 ;;
 
@@ -232,10 +230,11 @@ let rec update_letrec_pointer st p1 p2 =
         | [] -> []
     in
     match st with
-    | Ptr(p, v) :: t ->
-            Ptr(p, match v with
-                   | VClousure(e, env) -> VClousure (e, update_enclosed_env env p1 p2)
-                   | _ -> v) :: update_letrec_pointer t p1 p2
+    | Ptr(p, rc, v) :: t ->
+            Ptr(p, rc, match v with
+                       | VClousure(e, env) -> VClousure (e, update_enclosed_env env p1 p2)
+                       | _ -> v)
+            :: update_letrec_pointer t p1 p2
     | [] -> []
 ;;
 
@@ -244,7 +243,7 @@ let rec update_letrec_pointer st p1 p2 =
 let rec eval st env exp = match exp with
     | EInt n ->
             let newp = fresh_ptrname ptr_count in
-            let st' = extend_storage st newp (VInt n) in
+            let st' = extend_storage st newp 1 (VInt n) in
             (st', newp)
     | EVar x ->
             let p = lookup_env env x in
@@ -252,11 +251,11 @@ let rec eval st env exp = match exp with
     | EBin(op, e1, e2) ->
             let (st1, p1) = eval st env e1 in
             let (st2, p2) = eval st1 env e2 in
-            let Ptr(_,v1) = lookup_storage st2 p1 in
+            let Ptr(_,_,v1) = lookup_storage st2 p1 in
             let n1 = match v1 with
                      | VInt n -> n
                      | _ -> failwith ("lhs of addition is not an integer") in
-            let Ptr(_,v2) = lookup_storage st2 p2 in
+            let Ptr(_,_,v2) = lookup_storage st2 p2 in
             let n2 = match v2 with
                      | VInt n -> n
                      | _ -> failwith ("rhs of addition is not an integer") in
@@ -265,26 +264,26 @@ let rec eval st env exp = match exp with
                     | "+" -> VInt (n1 + n2)
                     | "-" -> VInt (n1 - n2)
                     | _ -> failwith (sprintf "unsupported binary operation %s" op) in
-            (extend_storage st2 pname v, pname)
+            (extend_storage st2 pname 1 v, pname)
     | EIsZero(e) ->
             let (st1, p) = eval st env e in
-            let Ptr(_,v) = lookup_storage st1 p in
+            let Ptr(_,_,v) = lookup_storage st1 p in
             let n = match v with
                     | VInt n -> n
                     | _ -> failwith ("iszero has non-integer argument") in
             let pname = fresh_ptrname ptr_count in
             if n = 0 then
-                (extend_storage st1 pname (VInt 1), pname)
+                (extend_storage st1 pname 1 (VInt 1), pname)
             else
-                (extend_storage st1 pname (VInt 0), pname)
+                (extend_storage st1 pname 1 (VInt 0), pname)
     | ELambda(x, e1) ->
             let newp = fresh_ptrname ptr_count in
             (* XXX do we need to copy env? *)
-            let st' = extend_storage st newp (VClousure(ELambda(x, e1), env)) in
+            let st' = extend_storage st newp 1 (VClousure(ELambda(x, e1), env)) in
             (st', newp)
     | ECond(e1, e2, e3) ->
             let (st1, p1) = eval st env e1 in
-            let Ptr(_,v) = lookup_storage st1 p1 in
+            let Ptr(_,_,v) = lookup_storage st1 p1 in
             let n = match v with
                     | VInt n -> n
                     | _ -> failwith ("non-integer result in the condition predicate") in
@@ -295,7 +294,7 @@ let rec eval st env exp = match exp with
     | EApply(e1, e2) ->
             let (st1, p1) = eval st env e1 in
             let (st2, p2) = eval st1 env e2 in
-            let Ptr(_,v1) = lookup_storage st2 p1 in
+            let Ptr(_,_,v1) = lookup_storage st2 p1 in
             let (e', env') = match v1 with
                              | VClousure(e', env') -> (e', env')
                              | _ -> failwith ("lhs of apply is not a lambda abstraction") in
@@ -334,4 +333,3 @@ let t = eval empty_storage empty_env v;;
 match t with | (st, pname) ->
     print_storage st;
     printf "; %s\n" pname ;;
-
