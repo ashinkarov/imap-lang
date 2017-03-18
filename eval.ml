@@ -140,16 +140,6 @@ let test () =
 
 (* test ();; *)
 
-let rec update_storage st pname v = match st with
-    | Ptr(pname', rc, v') :: t ->
-            if pname' = pname then
-                Ptr(pname', rc, v) :: (update_storage t pname v)
-            else
-                Ptr(pname', rc, v') :: (update_storage t pname v)
-    | [] -> []
-;;
-
-
 let keywords =
   ["("; ")"; "+"; "-"; "=";
    "if"; "then"; "else"; "iszero";
@@ -238,6 +228,158 @@ let rec update_letrec_pointer st p1 p2 =
     | [] -> []
 ;;
 
+let rec imm_use e r = match e with
+    | EInt _ -> r
+    | EVar x -> x :: r
+    | EBin(_, e1, e2) -> imm_use e2 (imm_use e1 r)
+    | EIsZero(e) -> imm_use e r
+    | ELambda(x, e) -> r
+    | EApply(e1, e2) -> imm_use e2 (imm_use e1 r)
+    | ECond(e1,_,_) -> imm_use e1 r
+    | ELetRec(_,_,_) -> r (* FIXME what do we do here? *)
+;;
+
+let rec unique l = match l with
+    | h :: t -> h :: (unique (filter (fun x -> x <> h) t))
+    | [] -> []
+;;
+
+let rec capture e r = match e with
+    | EInt _ -> r
+    | EVar x -> x :: r
+    | EBin(_, e1, e2) -> capture e2 (capture e1 r)
+    | EIsZero e -> capture e r
+    | ELambda(x, e) ->
+            let fv = filter (fun x' -> x' <> x) (capture e []) in
+            append r (unique fv)
+    | EApply(e1, e2) -> capture e2 (capture e1 r)
+    | ECond(e1,e2,e3) ->
+            let r1 = capture e1 r in
+            let fv1 = capture e2 [] in
+            let fv2 = capture e3 [] in
+            append r1 (unique (append fv1 fv2))
+    | ELetRec(x,e1,e2) ->
+            let fv1 = filter (fun x' -> x' <> x) (capture e1 []) in
+            let fv2 = filter (fun x' -> x' <> x) (capture e2 []) in
+            append r (unique (append fv1 fv2))
+;;
+
+let rec prtlst l = match l with
+    | h :: t -> printf "%s, " h; prtlst t
+    | [] -> printf "_\n"
+;;
+
+let test_imm_use () =
+    let e = parse_expr (lex (Stream.of_string "(f 1) + (f 1)")) in
+    prtlst (imm_use e []);
+    prtlst (capture e [])
+;;
+
+(* test_imm_use ();;  *)
+
+
+let rec rc_inc st pname = match st with
+    | Ptr(s, rc', v) as p :: t ->
+            if s = pname then
+                Ptr(s, rc'+1, v) :: t
+            else
+                p :: rc_inc t pname
+    | [] -> failwith (sprintf "rc_inc failed to find pointer %s" pname)
+;;
+
+let rec rc_dec st pname =
+    let rec dec st pname = match st with
+    | Ptr(s, rc', v) as p :: t ->
+            if s = pname then
+                (Ptr(s, rc'-1, v) :: t, v, rc'-1)
+            else
+                let (st1, v, rc'') = dec t pname in
+                (p :: st1, v, rc'')
+    | [] -> failwith (sprintf "rc_dec failed to find pointer %s" pname)
+    in
+    let (st1, v, rc) = dec st pname in
+    if rc = 0 then
+        match v with
+        | VInt _ -> st1
+        | VClousure(e, env) ->
+                let vars = capture e [] in
+                (* FIXME this doesn't work with cycles... *)
+                let rec upd st vars = match vars with
+                    | v :: t ->
+                            let pname = lookup_env env v in
+                            rc_dec (upd st t) pname
+                    | [] -> st
+                in
+                upd st1 vars
+    else
+        st1
+;;
+
+(*let rec rc_dec_fun st pname = match st with
+    | Ptr(s, rc', v) as p :: t ->
+            if s = pname then
+                Ptr(s, rc'-1, v) :: t
+            else
+                p :: rc_dec_fun t pname
+    | [] -> failwith (sprintf "rc_dec_fun failed to find pointer %s" pname)
+;;*)
+
+(*let bump_fv st env e =
+    let rec bump_helper st env fvlist = match fvlist with
+    | [] -> st
+    | h :: t ->
+            let count = length (filter (fun x -> x = h) t) + 1 in
+            (*printf "\t--> #fv %s = %d\n" h count; *)
+            let pname = lookup_env env h in
+            bump_helper (rc_add st pname count) env (filter (fun x -> x <> h) t)
+    in
+    let st' = bump_helper st env (fv e []) in
+    printf "  --> "; print_storage st'; printf "\n";
+    st'
+;;*)
+
+let inc_func_arg_rc st pname x ebody =
+    let vars = capture ebody [] in
+    printf "  -- capture %s (ptr = %s) -> " x pname; print_expr ebody; printf " = ";
+    prtlst (filter (fun x' -> x' = x) vars);
+    let count = fold_left (fun v x' -> v + if x' = x then 1 else 0) 0 vars in
+    if count = 0 then
+        rc_dec st pname
+    else
+        let rec upd n = if n = 0 then st else rc_inc (upd (n-1)) pname in
+        upd (count - 1)
+;;
+
+
+let inc_func_fv_rc st env x ebody =
+    let vars = filter (fun x' -> x' <> x) (capture ebody []) in
+    printf "  -- func fv use %s in -> " x ; print_expr ebody; printf " = "; prtlst vars;
+    let rec upd l = match l with
+                    | h :: t -> rc_inc (upd t) (lookup_env env h)
+                    | [] -> st
+    in upd vars
+;;
+
+let inc_branch_fv_rc st env e =
+    let vars = capture e [] in
+    printf "  -- branch fv -> "; print_expr e; printf " = "; prtlst vars;
+    let rec upd l = match l with
+                    | h :: t -> rc_inc (upd t) (lookup_env env h)
+                    | [] -> st
+    in upd vars
+;;
+
+let dec_cond_fv_rc st env e =
+    let (e1, e2) = match e with
+        | ECond(e1, e2, e3) -> (e2, e3)
+        | _ -> failwith ("dec_cond_fv got non-conditional") in
+    let vars = unique (append (capture e1 []) (capture e2 [])) in
+    printf "  -- cond fv dec -> "; print_expr e; printf " = "; prtlst vars;
+    let rec upd l = match l with
+                    | h :: t -> rc_dec (upd t) (lookup_env env h)
+                    | [] -> st
+    in upd vars
+;;
 
 
 let rec eval st env exp = match exp with
@@ -264,7 +406,9 @@ let rec eval st env exp = match exp with
                     | "+" -> VInt (n1 + n2)
                     | "-" -> VInt (n1 - n2)
                     | _ -> failwith (sprintf "unsupported binary operation %s" op) in
-            (extend_storage st2 pname 1 v, pname)
+            let st3 = rc_dec st2 p1 in
+            let st4 = rc_dec st3 p2 in
+            (extend_storage st4 pname 1 v, pname)
     | EIsZero(e) ->
             let (st1, p) = eval st env e in
             let Ptr(_,_,v) = lookup_storage st1 p in
@@ -272,10 +416,11 @@ let rec eval st env exp = match exp with
                     | VInt n -> n
                     | _ -> failwith ("iszero has non-integer argument") in
             let pname = fresh_ptrname ptr_count in
+            let st2 = rc_dec st1 p in
             if n = 0 then
-                (extend_storage st1 pname 1 (VInt 1), pname)
+                (extend_storage st2 pname 1 (VInt 1), pname)
             else
-                (extend_storage st1 pname 1 (VInt 0), pname)
+                (extend_storage st2 pname 1 (VInt 0), pname)
     | ELambda(x, e1) ->
             let newp = fresh_ptrname ptr_count in
             (* XXX do we need to copy env? *)
@@ -287,11 +432,19 @@ let rec eval st env exp = match exp with
             let n = match v with
                     | VInt n -> n
                     | _ -> failwith ("non-integer result in the condition predicate") in
+            let st2 = rc_dec st1 p1 in
             if n = 0 then
-                eval st1 env e3
+                let st3 = inc_branch_fv_rc st2 env e3 in
+                let (st4, p) = eval st3 env e3 in
+                let st5 = dec_cond_fv_rc st4 env exp in
+                (st5, p)
             else
-                eval st1 env e2
+                let st3 = inc_branch_fv_rc st2 env e2 in
+                let (st4, p) = eval st3 env e2 in
+                let st5 = dec_cond_fv_rc st4 env exp in
+                (st5, p)
     | EApply(e1, e2) ->
+            printf "  App --> "; print_expr exp; printf "\n";
             let (st1, p1) = eval st env e1 in
             let (st2, p2) = eval st1 env e2 in
             let Ptr(_,_,v1) = lookup_storage st2 p1 in
@@ -301,7 +454,16 @@ let rec eval st env exp = match exp with
             let (x, ebody) = match e' with
                              | ELambda(x, ebody) -> (x, ebody)
                              | _ -> failwith ("closure does not contain lambda abstraction") in
-            eval st2 (extend_env env' x p2) ebody
+            let env'' = extend_env env' x p2 in
+            (* immediate uses and captures (function is called capture, but computes both) *)
+            let st3 = inc_func_arg_rc st2 p2 x ebody in
+            (* update free variables that will be used immediately in the body *)
+            let st4 = inc_func_fv_rc st3 env' x ebody in
+            printf "  -1-> "; print_storage st4; printf "\n";
+            let (st5, p3) = eval st4 env'' ebody in
+            let st6 = rc_dec st5 p1 in
+            printf "  -2-> "; print_storage st6; printf "\n\n";
+            (st6, p3)
     | ELetRec(x, e1, e2) ->
             let pname = fresh_ptrname ptr_count in
             let env' = extend_env env x pname in
@@ -322,8 +484,15 @@ let prog06 = "(\\f.(\\x.f (\\v.((x x) v))) (\\x.f (\\v.((x x) v)))) "
            ^ "(\\f.\\x.if (iszero x) then 0 else x + f (x-1)) 2"
 let prog07 = "letrec f = 1 in f"
 let prog08 = "letrec f = \\x.if iszero x then x else f (x-1) in f 1"
+let prog09 = "(\\x.\\y.\\z.\\w.x + x + x) 2 3 4"
+let prog10 = "(\\x.\\y.x + (\\z.1) (\\w.x+x+x)) 2 3"
+let prog11 = "(\\f.\\x.f 1) ((\\f.\\x.f 1) ((\\x.\\y.x) 2))"
+let prog12 = "(\\x.\\y. if iszero (x+x+x) then x + x + x else x) 1 2"
+let prog13 = "(\\x.\\y. if iszero (x) then (\\z.y) (x + x + x) else x) 0 2"
+let prog14 = "(\\x.\\y. if iszero (x) then if x then x + x + x else 0 else x) 0 2"
+let prog15 = "(letrec f = \\x.if iszero x then 5 else f (x-1) in \\x.f x) 0"
 
-let prog = prog08
+let prog = prog15
 
 let v = parse_expr (lex (Stream.of_string prog));;
 print_expr v;;
