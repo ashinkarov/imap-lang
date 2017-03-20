@@ -418,10 +418,11 @@ let rec eval st env exp = match exp with
             (extend_storage st4 pname 1 v, pname)
     | EIsZero(e) ->
             let (st1, p) = eval st env e in
-            let Ptr(_,_,v) = lookup_storage st1 p in
+            let Ptr(_,rc,v) = lookup_storage st1 p in
             let n = match v with
                     | VInt n -> n
                     | _ -> failwith ("iszero has non-integer argument") in
+            printf "\t---IsZero: RC ("; print_expr e; printf ") = %d\n" rc;
             let pname = fresh_ptrname ptr_count in
             let st2 = rc_dec st1 p in
             if n = 0 then
@@ -468,8 +469,8 @@ let rec eval st env exp = match exp with
             (* update free variables that will be used immediately in the body *)
             let st4 = inc_func_fv_rc st3 env' x ebody in
             printf "  -1-> "; print_storage st4; printf "\n";
-            let (st5, p3) = eval st4 env'' ebody in
-            let st6 = rc_dec st5 p1 in
+            let st5 = rc_dec st4 p1 in
+            let (st6, p3) = eval st5 env'' ebody in
             printf "  -2-> "; print_storage st6; printf "\n\n";
             (st6, p3)
     | ELetRec(x, e1, e2) ->
@@ -509,6 +510,7 @@ let prog19 = "(\\g.\\x.g x) (letrec f = \\x.x+1 in f)  3"
 let prog20 = "(\\g.\\x.g x) (letrec f = \\x.if iszero x then x else x + (f (x-1)) in f)  3"
 let prog21 = "letrec f = \\x.f x in 5"
 let prog22 = "letrec f = \\x.if iszero x then x else f (x-1) in f 1 + f 1"
+let prog23 = "(\\f.(f 1)) ((\\x.\\y.iszero x) 2)"
 
 let prog = prog20
 
