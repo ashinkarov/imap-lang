@@ -39,13 +39,16 @@ and value =
 let empty_storage: (ptr list) = [];;
 let empty_env: (string * string) list = [];;
 
-let rec lookup_storage st x = match st with
+let rec lookup_storage ?(warn=true) st x  = match st with
     | h :: t ->
-      let name = match h with | Ptr(a, _, _) -> a in
+      let Ptr(name, rc, _) = h in
       if name = x then
-         h
+          (if rc = 0 && warn then
+              (printf "\t!!lookup of the pointer %s with RC=0!\n" name; h)
+          else
+              h)
       else
-         lookup_storage t x
+          lookup_storage t x ~warn:warn
     | [] -> failwith (sprintf "storage lookup error for name %s" x)
 
 let rec lookup_env env x = match env with
@@ -287,32 +290,36 @@ let rec rc_inc st pname = match st with
     | [] -> failwith (sprintf "rc_inc failed to find pointer %s" pname)
 ;;
 
-let rec rc_dec st pname =
-    let rec dec st pname = match st with
-    | Ptr(s, rc', v) as p :: t ->
-            if s = pname then
-                (Ptr(s, rc'-1, v) :: t, v, rc'-1)
-            else
-                let (st1, v, rc'') = dec t pname in
-                (p :: st1, v, rc'')
-    | [] -> failwith (sprintf "rc_dec failed to find pointer %s" pname)
-    in
-    let (st1, v, rc) = dec st pname in
+
+let rec rc_dec' st pname ptrs =
+    printf "\t--- rc_dec' %s, st={" pname; print_storage st; printf "}, ptrs={"; prtlst ptrs; printf "}\n";
+    if mem pname ptrs then
+        st
+    else
+    let st1 = map (fun p -> let Ptr(s,rc,v) = p in
+                            if s = pname then
+                                Ptr(s, rc-1, v)
+                            else
+                                p)
+                  st in
+    let Ptr(s, rc, v) = lookup_storage st1 pname ~warn:false in
     if rc = 0 then
         match v with
         | VInt _ -> st1
         | VClousure(e, env) ->
                 let vars = capture e [] in
-                (* FIXME this doesn't work with cycles... *)
                 let rec upd st vars = match vars with
                     | v :: t ->
                             let pname = lookup_env env v in
-                            rc_dec (upd st t) pname
+                            rc_dec' (upd st t) pname (s::ptrs)
                     | [] -> st
                 in
                 upd st1 vars
     else
         st1
+;;
+
+let rc_dec st pname = rc_dec' st pname []
 ;;
 
 (*let rec rc_dec_fun st pname = match st with
@@ -447,6 +454,7 @@ let rec eval st env exp = match exp with
             printf "  App --> "; print_expr exp; printf "\n";
             let (st1, p1) = eval st env e1 in
             let (st2, p2) = eval st1 env e2 in
+            printf "  -0-> "; print_storage st2; printf "\n";
             let Ptr(_,_,v1) = lookup_storage st2 p1 in
             let (e', env') = match v1 with
                              | VClousure(e', env') -> (e', env')
@@ -469,7 +477,10 @@ let rec eval st env exp = match exp with
             let env' = extend_env env x pname in
             let (st1, p1) = eval st env' e1 in
             let st2 = update_letrec_pointer st1 pname p1 in
-            eval st2 (extend_env env x p1) e2
+            let st3 = inc_func_arg_rc st2 p1 x e2 in
+            let (st4, p3) = eval st3 (extend_env env x p1) e2 in
+            printf "  -LR-> "; print_storage st3; printf "\n\n";
+            (st4, p3)
 
     | _ -> failwith ("attempt to evaluate unknown AST node")
 ;;
@@ -483,7 +494,7 @@ let prog05 = "(\\f.(f 1) + (f 1)) ((\\x.\\y.x) 2)"
 let prog06 = "(\\f.(\\x.f (\\v.((x x) v))) (\\x.f (\\v.((x x) v)))) "
            ^ "(\\f.\\x.if (iszero x) then 0 else x + f (x-1)) 2"
 let prog07 = "letrec f = 1 in f"
-let prog08 = "letrec f = \\x.if iszero x then x else f (x-1) in f 1"
+let prog08 = "letrec f = \\x.if iszero x then x else f (x-1) in f 4"
 let prog09 = "(\\x.\\y.\\z.\\w.x + x + x) 2 3 4"
 let prog10 = "(\\x.\\y.x + (\\z.1) (\\w.x+x+x)) 2 3"
 let prog11 = "(\\f.\\x.f 1) ((\\f.\\x.f 1) ((\\x.\\y.x) 2))"
@@ -491,8 +502,15 @@ let prog12 = "(\\x.\\y. if iszero (x+x+x) then x + x + x else x) 1 2"
 let prog13 = "(\\x.\\y. if iszero (x) then (\\z.y) (x + x + x) else x) 0 2"
 let prog14 = "(\\x.\\y. if iszero (x) then if x then x + x + x else 0 else x) 0 2"
 let prog15 = "(letrec f = \\x.if iszero x then 5 else f (x-1) in \\x.f x) 0"
+let prog16 = "letrec f = \\x.f x in (\\x.1) f "
+let prog17 = "(\\z.letrec f = \\x.f x in (\\x.1) f) 3"
+let prog18 = "letrec f = \\x.x+1 in f  3"
+let prog19 = "(\\g.\\x.g x) (letrec f = \\x.x+1 in f)  3"
+let prog20 = "(\\g.\\x.g x) (letrec f = \\x.if iszero x then x else x + (f (x-1)) in f)  3"
+let prog21 = "letrec f = \\x.f x in 5"
+let prog22 = "letrec f = \\x.if iszero x then x else f (x-1) in f 1 + f 1"
 
-let prog = prog15
+let prog = prog20
 
 let v = parse_expr (lex (Stream.of_string prog));;
 print_expr v;;
