@@ -479,9 +479,10 @@ let rec eval st env exp = match exp with
             let (st1, p1) = eval st env' e1 in
             let st2 = update_letrec_pointer st1 pname p1 in
             let st3 = inc_func_arg_rc st2 p1 x e2 in
-            let (st4, p3) = eval st3 (extend_env env x p1) e2 in
-            printf "  -LR-> "; print_storage st3; printf "\n\n";
-            (st4, p3)
+            let st4 = inc_func_fv_rc st3 env x e2 in
+            let (st5, p3) = eval st4 (extend_env env x p1) e2 in
+            printf "  -LR-> "; print_storage st5; printf "\n\n";
+            (st5, p3)
 
     | _ -> failwith ("attempt to evaluate unknown AST node")
 ;;
@@ -511,8 +512,10 @@ let prog20 = "(\\g.\\x.g x) (letrec f = \\x.if iszero x then x else x + (f (x-1)
 let prog21 = "letrec f = \\x.f x in 5"
 let prog22 = "letrec f = \\x.if iszero x then x else f (x-1) in f 1 + f 1"
 let prog23 = "(\\f.(f 1)) ((\\x.\\y.iszero x) 2)"
+let prog24 = "(\\x.letrec f = \\y.x in (f x) + x) 1"
+let prog25 = "(\\x.letrec f = x in f + x + x) 1"
 
-let prog = prog20
+let prog = prog25
 
 let v = parse_expr (lex (Stream.of_string prog));;
 print_expr v;;
